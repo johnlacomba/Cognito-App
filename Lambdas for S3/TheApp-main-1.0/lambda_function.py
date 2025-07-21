@@ -1,904 +1,911 @@
-# This builds the main page that makes the calls out to DynamoDB, it uses the access_token from sessionStorage.
-# The python is responsible for editing the javascript inside the HTML body and 
-#replaces the following strings with the values from the relevant lambda environment variables:
-#userpooldomain, theregion, userpoolclientid, apiid, stagename.
-#
-
-import os
-
-def lambda_handler(event, context):
-    # Read in the environment variables
-    userpooldomain = os.environ['userpooldomain']
-    theregion = os.environ['theregion']
-    userpoolclientid1 = os.environ['userpoolclientid1']
-    userpoolclientid2 = os.environ['userpoolclientid2']
-    apiid = os.environ['apiid']
-    stagename = os.environ['stagename'].lower()
-    
-    # Read in the scopes passed to this function
-    theScopes = event['requestContext']['authorizer']['claims']['scope']
-    
-    # Build the dynamoDB table prefix from the stagename, for use in the calls to callDynamoDB()
-    if stagename == "sit" or stagename == "dev":
-        dyntableprefix = "dev"
-    elif stagename == "perf":
-        dyntableprefix = "prf"
-    elif stagename == "prod":
-        dyntableprefix = "prd"
-    
-    responseToReturn = {
-        "statusCode": 200,
-        "headers": {
-            "Content-Type": "text/html"
-        },
-        "body": """<!DOCTYPE html>
-<html>
-
-<body>
-
-<style type="text/css">
-    
-    body{
-        background:darkslateblue;
-    }
-    
-    #div-title1 {
-        white-space:nowrap;
-        overflow-x:auto;
-    } 
-    
-    #theapplogo {
-        background: #000;
-        margin-top:-40px;
-    }
-    
-    #logoline {
-        margin-left: auto;
-        margin-right: auto;
-        width:100%;
-        height:40px;
-        background:black;
-    }
-    
-    .centerlogo {
-        display: block;
-        margin-left: auto;
-        margin-right: auto;
-        max-width: 100%;
-        max-height: 40px;
-        text-align: center;
-    }
-    
-    .centerborder {
-        display: block;
-        margin-left: auto;
-        margin-right: auto;
-        text-align: center;
-        max-width: 80%;
-        border: 3px solid black;
-        background:silver;
-    }
-    
-    textarea {
-        width: 240px;
-        height: 16px;
-        overflow: hidden;
-        resize: none;
-    }
-    
-    .result {
-        white-space:pre-wrap;
-        text-align: left;
-    }
-    
-    .heading {
-        text-align: center;
-        font-size: 1.5em;
-    }
-    
-    hr.border {
-        border: 0.3em solid black;
-    }
-
-    #loadingOverlay {
-        position: fixed; /* make it fixed to the window */
-        top: 0; /* position from the top of the window */
-        left: 0; /* position from the left of the window */
-        width: 100%; /* cover the entire window */
-        height: 100%; /* cover the entire window */
-        background-color: rgba(0, 0, 0, 0.5); /* semi-transparent black background */
-        display: flex; /* use flexbox to center the content */
-        justify-content: center; /* center horizontally */
-        align-items: center; /* center vertically */
-        z-index: 999; /* make it appear over everything */
-        display: none; /* start invisible */
-      }
-    
-    #loadingOverlay-content {
-        width: 40px;
-        height: 40px;
-        background-color: black;
-        color: white;
-        border-radius: 50%;
-        border: 10px solid transparent;
-        border-top-color: black;
-        animation: rotate 0.66s linear infinite;
-        display: none; /* start invisible */
-        justify-content: center;
-        align-items: center;
-      }
-
-    @keyframes rotate {
-      0% {
-        transform: rotate(0deg);
-      }
-      100% {
-        transform: rotate(360deg);
-      }
-    }
-    
-</style>
-
-<!-- This line prevents 403 errors for the favicon.ico when loading the page -->
-<link rel="icon" href="data:;base64,iVBORw0KGgo=">
-
-<div id="loadingOverlay">
-    <div id="loadingOverlay-content">
-        <p>theapp</p>
-    </div>
-</div>
-
-<div id="logoline"></div>
-
-<img class="centerlogo" id=theapplogo src="LOGO_URL"></img>
-
-<!-- NOTE: indexList starts empty because the header is defined in postDescribeTable() -->
-<div class="centerborder">
-    <div id="manualHeader" class="heading">Query by table and index</div>
-    
-    <select id = "tableList" onfocus = "document.getElementById('indexList').selectedIndex=0;">
-        <option> ---Choose table name--- </option>
-    </select>
-    
-    <select id = "indexList" >
-    </select>
-    
-    <div id="div-title1">
-        <a id="queryType">Query by "partition key":</a>
-        <textarea id="queryInputManual"></textarea>
-    </div>
-    
-    <div>
-        <button id="submitManual" type="submit">Submit</button>
-    </div>
-    
-    <div id="resultManual" class="result"></div>
-</div>
-
-<hr class="border"></hr>
-
-<div class="centerborder">
-    <div id="snapshotHeader" class="heading">360L Radio Snapshot Tool</div>
-
-    <div id="div-title1">
-        <a id="queryType">Query by the RadioID:</a>
-        <textarea id="queryInput"></textarea>
-    </div>
-    
-    <div>
-        <button id="submit" type="submit">Submit</button>
-    </div>
-    
-    <div id="01" class="result"></div>
-    <div id="02" class="result"></div>
-    <div id="03" class="result"></div>
-    <div id="04" class="result"></div>
-    <div id="05" class="result"></div>
-    <div id="06" class="result"></div>
-    <div id="07" class="result"></div>
-    <div id="08" class="result"></div>
-</div>
-
-<script id="executeQuery" type="text/javascript">
-    // Declare some global vars
-    let lines, linesTable;
-    let sortKey;
-    let indexList = document.getElementById("indexList");
-    let tableList = document.getElementById("tableList");
-    let tableBlacklist = ["prd-tenfoot", "prd-oactrust", "prd-k2refreshtokenlink", "terraform-state-table", "terraform-state-lock-table"];
-    let targetTable;    // This is changed in the chooseTable function
-    
-    // All of this is needed to dynamically resize the textarea as it's populated
-    let textarea = document.getElementById("queryInput");
-    let tael = textarea.addEventListener.bind(textarea);
-    let autoResizeTextArea = (e) => {
-        const element = e.target
-        element.style.height = 'auto'
-        element.style.height = '16px'
-        element.style.overflowY = 'hidden'
-        element.style.height = element.scrollHeight + 'px'
-    }
-    tael('update', autoResizeTextArea);
-    tael('keyup', autoResizeTextArea);
-    
-    // All of this is needed to dynamically resize the textarea queryInputManual as it's populated
-    let textareaM = document.getElementById("queryInputManual");
-    let taelM = textareaM.addEventListener.bind(textareaM);
-    let autoResizeTextAreaM = (e) => {
-        const elementM = e.target
-        elementM.style.height = 'auto'
-        elementM.style.height = '16px'
-        elementM.style.overflowY = 'hidden'
-        elementM.style.height = elementM.scrollHeight + 'px'
-    }
-    taelM('update', autoResizeTextArea);
-    taelM('keyup', autoResizeTextArea);
-    
-    
-    
-    // Set up the onChange event to set up the tableList select element
-    tableList.onchange = async function(){
-        await onChangeChooseTable();
-        await onChangeChooseTableSetIndexList();
-    }
-    // Set up the onChange event to set up the indexList select element
-    indexList.onchange = chooseIndex;
-    
-    // This is to set the text area to click the submit button when hitting enter (and not holding shift)
-    document.getElementById("queryInput")
-    .addEventListener("keyup", function(event) {
-        event.preventDefault();
-        if (event.keyCode === 13 && ! event.shiftKey) {
-            // Remove the newline that was added when the user pressed Enter
-            queryInput.value = queryInput.value.substring(0,queryInput.value.length-1);
-            // Submit the POST
-            document.getElementById("submit").click();
-        }
-    });
-    document.getElementById("queryInputManual")
-    .addEventListener("keyup", function(event) {
-        event.preventDefault();
-        if (event.keyCode === 13 && ! event.shiftKey) {
-            // Remove the newline that was added when the user pressed Enter
-            queryInputManual.value = queryInputManual.value.substring(0,queryInputManual.value.length-1);
-            // Submit the POST
-            document.getElementById("submitManual").click();
-        }
-    });
-    
-    // Used by tableList.onchange to define a promise for the responses from chooseTable() and postDescribeTable() 
-    function onChangeChooseTable() {
-        return new Promise(async function (resolve, reject) {
-            await chooseTable();
-            // Re-run postDescribeTable() with the updated table name
-            await postDescribeTable();
-            resolve();
-        })
-    }
-    
-    // Used by tableList.onchange to call chooseIndex(), or to handle clearing the page elements
-    function onChangeChooseTableSetIndexList(){
-        return new Promise(function (resolve, reject) {
-            indexList.selectedIndex = 0;
-            indexName = indexList.options[indexList.selectedIndex].text;
-            
-            // Force the first secondary index returned to be used.  This is done because when only one secondary index is returned the onChange event cannot fire.
-            // Check that a secondary index was returned before setting the secondary index
-            if ( indexName != 'No secondary indexes found.' ) {
-                //chooseIndex();
-            } else {
-                // Clear the text of the queryType element
-                document.getElementById("queryType").text = 'Query by "partition key":';
-                // Clear the placeholder text of the queryInputManual element
-                document.getElementById("queryInputManual").placeholder = "";
-                // Clear the text of the sortKeyText element (if any)
-                //document.getElementById("sortKeyText").innerHTML = "Available sort key: N/A";
-                // Clear the partitionKey value
-                partitionKey = ""
-            }
-            resolve();
-        })
-    }
-    
-    // Uses a promise and XMLHttpRequest to request the secondary indexes from a dynamodb table
-    function postDescribeTable() {
-    // Used to build the contents of the indexList element
-    // Building the XMLHttpRequest object to POST to the describetable API endpoint, using sessionStorage.access_token
-	    return new Promise(function (resolve, reject) {
-            // Make the "Loading" overlay visible
-            document.getElementById("loadingOverlay").style.display = "flex";
-            document.getElementById("loadingOverlay-content").style.display = "flex";
-            
-            var describetablepost = new XMLHttpRequest();
-            var url = "https://apiid.execute-api.theregion.amazonaws.com/stagename/describetable?queryTerm=" + targetTable;
-            describetablepost.open("POST", url, true);
-            describetablepost.setRequestHeader("Content-Type", "application/json");
-            describetablepost.setRequestHeader("Authorization", sessionStorage.access_token);
-    
-            describetablepost.onload = function(event){
-                const calldbResponse = event.target.response;
-                // Remove [] and {} characters from calldbResponse, as well as all empty lines
-                calldbResponseClean = calldbResponse.replace(/[\[\]\{\}:]/gm, '');
-                //calldbResponseClean2 = calldbResponseClean.replace("Response", '');
-                calldbResponseClean2 = calldbResponseClean.replace(/^\\s*$(?:\\r\\n?|\\n)/gm, '');
-                // Build lines[] from calldbResponseClean2
-                lines = calldbResponseClean2.replace(/\\n/g, "<br>").split("<br>");
-                // Create the object to use for appending to the dropdown list element 'indexList' 
-                var dropdownItem = document.createElement("option");
-                
-                // Add the header to the top of indexList
-                dropdownItem.innerText = " ---Choose index name--- "
-                indexList.appendChild(dropdownItem.cloneNode(true));
-                
-                // Append the first item in lines[] to the dropdown list element 'indexList'.  This is the primary index and usually lacks the string 'index'.
-                try {
-                    dropdownItem.innerText = lines[1].replace(/['",]+/g, '');
-                
-                    // For each line in calldbResponse (skipping lines 1 and 2 because they contains ['KeySchema'] and ['AttributeName'] (the primary key) and should be written on the lines above)
-                    for (let n = 0; n < lines.length; n++) {
-                        // Check if the line contains 'index'
-                        if ( lines[n].includes('index') || n == 1) {
-                            // Append that item in lines[] to the dropdown list element 'indexList'
-                            dropdownItem.innerText = lines[n].replace(/['",]+/g, '');
-                            // cloneNode true is required or only the last element in the array is appended to the indexList element. For
-                            //further details see here: https://stackoverflow.com/questions/55354063/appendchild-only-works-on-last-element
-                            indexList.appendChild(dropdownItem.cloneNode(true));
-                        }
-                    }
-                } catch (error) {
-                    // Hide the "Loading" overlay
-                    document.getElementById("loadingOverlay").style.display = "none";
-                    document.getElementById("loadingOverlay-content").style.display = "none";
-                    console.log(error);
-                    // Reload the page to get a new access token
-                    document.location.reload();
-                    reject(error);
-                }
-                // Hide the loading overlay
-                document.getElementById("loadingOverlay").style.display = "none";
-                document.getElementById("loadingOverlay-content").style.display = "none";
-                
-                resolve();
-            };
-            // Submit the describetable API POST with the request parameters as queryStrings in the url
-            describetablepost.send();
-        })
-    }
-
-    // Uses a promise and XMLHttpRequest to request all tables in dynamodb
-    function postListTables() {
-    // Used to build the contents of the tableList element
-    // Building the XMLHttpRequest object to POST to the listtables API endpoint, using sessionStorage.access_token
-        return new Promise(function (resolve, reject) {
-            // Make the "Loading" overlay visible
-            document.getElementById("loadingOverlay").style.display = "flex";
-            document.getElementById("loadingOverlay-content").style.display = "flex";
-            
-            let listtablespost = new XMLHttpRequest();
-            var url = "https://apiid.execute-api.theregion.amazonaws.com/stagename/listtables";
-            listtablespost.open("POST", url, true);
-            listtablespost.setRequestHeader("Content-Type", "application/json");
-            listtablespost.setRequestHeader("Authorization", sessionStorage.access_token);
-    
-            listtablespost.onload = function(event){
-                const calldbResponse = event.target.response;
-                // Remove [] and {} characters from calldbResponse, as well as all empty lines
-                calldbResponseClean = calldbResponse.replace(/[\[\]\{\}:]/gm, '');
-                //calldbResponseClean2 = calldbResponseClean.replace("Response", '');
-                calldbResponseClean2 = calldbResponseClean.replace(/^\\s*$(?:\\r\\n?|\\n)/gm, '');
-                // Build linesTable[] from calldbResponseClean2
-                linesTable = calldbResponseClean2.replace(/\\n/g, "<br>").split("<br>");
-                // Create the object to use for appending to the dropdown list element 'tableList' 
-                var dropdownItem = document.createElement("option");
-    	        
-                // For each line in calldbResponse
-                for (let n = 0; n < linesTable.length; n++) {
-                    // Don't include the linesTable[n] in the output if it's "response", null, or only spaces
-                    if (linesTable[n].toLowerCase().indexOf("response") === -1 && linesTable[n].length > 0 && linesTable[n].trim().length > 0) {
-                        // Append that item in linesTable[] to the dropdown list element 'tableList'
-                        dropdownItem.innerText = linesTable[n].replace(/['",]+/g, '');
-                        // cloneNode true is required or only the last element in the array is appended to the tableList element. For
-                        //further details see here: https://stackoverflow.com/questions/55354063/appendchild-only-works-on-last-element
-                        // Only append if the table name is outside the blacklist defined above
-                        if (!tableBlacklist.includes(dropdownItem.innerText.trim())) {
-                            tableList.appendChild(dropdownItem.cloneNode(true));
-                        }
-                    }
-                }
-                // Hide the loading overlay
-                document.getElementById("loadingOverlay").style.display = "none";
-                document.getElementById("loadingOverlay-content").style.display = "none";
-                
-                resolve();
-            };
-            // Submit the listtables API POST
-            listtablespost.send();
-        })
-    }
-
-    // Set up page elements based on what's selected from tableList
-    function chooseTable() {
-    // Set tableName based on what's selected from tableList
-    // With the newly updated tableName, use function postDescribeTable to update the indexList
-        return new Promise(function (resolve, reject) {    
-            //indexName = indexList.options[indexList.selectedIndex].text;
-            
-            // Set the tableName for the query to the selection from the dropdown list
-            tableName = tableList.options[tableList.selectedIndex].text;
-            
-            document.getElementById("queryInputManual").placeholder="";
-            
-            // Set up the page elements and partitionKey string based on the selection from the dropdown list
-            targetTable = tableName
-            
-            // After executing this function clear the dropdown contents of the index list
-            indexList.textContent = '';
-            resolve();
-        })
-    }
-
-    // Set up page elements based on what's selected from indexList
-    function chooseIndex() {
-        // If the indexList has no selection then set selectedIndex to the first item
-        if ( indexList.selectedIndex == "-1" || indexList.selectedIndex == null ) {
-            indexList.selectedIndex = 0;
-            //indexList.options[indexList.selectedIndex] = "0";
-        }
-        // Set the indexName for the query to the selection from the dropdown list
-        
-        indexName = indexList.options[indexList.selectedIndex].text;
-        
-        document.getElementById("queryInputManual").placeholder="";
-        
-        // Set up the page elements and partitionKey string based on the selection from the dropdown list
-        // Read in the partitionKey from lines[]
-        // For each line
-        for (let n = 0; n < lines.length; ) {
-            //console.log(lines[n]);
-            // Check if the selected indexName is included on the current line
-            if ( lines[n].includes(indexName) ) {
-            // If true then 
-                // iterate the line to the next item
-                n++;
-                // store that item as the partitionKey
-                partitionKey = lines[n].replace(/['",]+/g, '');
-                // Iterate the line
-                n++;
-                // Check if the line includes 'index' (but always trigger on the first line as it is the primary index)
-                if ( lines[n].includes('index') || n == 1) {
-                // If true then
-                    // exit the loop
-                    break;
-                } else {
-                // If false then
-                    // store that item as the sortKey
-                    sortKey = lines[n].replace(/['",]+/g, '');
-                    // exit the loop
-                    break;
-                }
-            } else {
-            // If false then 
-                // Iterate the line
-                n++;
-            }
-        }
-        
-        // Set the text of the queryType element
-        document.getElementById("queryType").text = 'Query by ' + partitionKey + ':';
-        // Set the placeholder text of the queryInputManual element
-        document.getElementById("queryInputManual").placeholder = partitionKey;
-        // Set the text of the sortKeyText element (if any)
-        if ( typeof sortKey != 'undefined' ) {
-            //document.getElementById("sortKeyText").innerHTML = "Available sort key: " + sortKey;
+terraform {
+    backend "s3" {}
+    required_providers {
+        aws = {
+        source  = "hashicorp/aws"
         }
     }
-    
-    // Used in mainFunction() to query dynamoDB
-    function callDynamoDB(queryInput, indexName, partitionKey, tableName) {
-        return new Promise((resolve, reject) => {
-            // If queryInput isn't populated then clear queryResponse and resolve the promise
-            //console.log(queryInput);
-            if (queryInput.length == 0 || queryInput == null) {
-                queryResponse = "";
-                reject("Error - A required value for the query was blank");
-                // Hide the "Loading" overlay
-                document.getElementById("loadingOverlay").style.display = "none";
-                document.getElementById("loadingOverlay-content").style.display = "none";
-                return;
-            }
-            // Building the XMLHttpRequest object to POST to the calldb API endpoint, using sessionStorage.access_token
-            var apipost = new XMLHttpRequest();
-            var url = "https://apiid.execute-api.theregion.amazonaws.com/stagename/calldb?queryTerm="+queryInput+"&indexName="+indexName+"&partitionKey="+partitionKey+"&tableName="+tableName;
-            var queryResult;
-            apipost.open("POST", url, true);
-            apipost.setRequestHeader("Content-Type", "application/json");
-            apipost.setRequestHeader("Authorization", sessionStorage.access_token);
-            
-            // When onreadystatechange is triggered check to confirm that the POST has completed and has returned a 200 response status
-            apipost.onreadystatechange = function() {
-                if (apipost.readyState === XMLHttpRequest.DONE && apipost.status === 200) {
-                    queryResult = apipost.responseText;
-                    //console.log("Query result without changes: " + queryResult);
-                    queryResultJSON = JSON.parse(queryResult);
-                    //console.log("Query result after converting to JSON: ", queryResultJSON);
-                    if (queryResultJSON.Items.length === 0) {
-                        queryResultJSON.Items = "No values found";
-                    }
-                    queryResponse = queryResultJSON;
-                    resolve();
-                } else if (apipost.readyState === XMLHttpRequest.DONE && apipost.status !== 200) {
-                    reject("Error - Access token is expired, reload the page.");
-                    // Hide the "Loading" overlay
-                    document.getElementById("loadingOverlay").style.display = "none";
-                    document.getElementById("loadingOverlay-content").style.display = "none";
-                    // Reload the page to get a new access token
-                    document.location.reload();
-                    return;
-                }
-            };
-            // Submit the main API POST with the request parameters as queryStrings in the url
-            apipost.send();
-        });
-    }
-    
-    // Executes the radio dump, called as defined in the setupClickEvent
-    async function mainFunction() {
-    	queryAccountnos = [];
-	    queryprimaryprofile = [];
-	    querysubscriptionid = [];
-        
-        // Make the "Loading" overlay visible
-        document.getElementById("loadingOverlay").style.display = "flex";
-        document.getElementById("loadingOverlay-content").style.display = "flex";
-        
-        /////
-        // #1. Query ${DYNAMODB_PREFIX}-device for RadioID/DeviceID (deviceid)
-        // Any trailing and leading whitespace around queryInput is removed with trim()
-        //console.log("#1. ", queryInput.value.trim());
-        try {
-            await callDynamoDB(queryInput.value.trim(), "deviceid", "deviceid", "dyntableprefix-device");
-            firstQueryJSON = queryResponse;
-            for (firstitem of firstQueryJSON.Items) {
-                if (firstitem.accountno) {
-                    queryAccountnos.push(firstitem.accountno);
-                }
-                if (firstitem.primaryprofile) {
-                    queryprimaryprofile.push(firstitem.primaryprofile);
-                }
-                if (firstitem.subscriptionid) {
-                    querysubscriptionid.push(firstitem.subscriptionid);
-                }
-            }
-            returnValue = document.getElementById("01").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n"
-                , "#1. Device ", queryInput.value, " in device:\\n", JSON.stringify(firstQueryJSON.Items, null, 4));
-        } catch (error) {
-            document.getElementById("01").innerHTML = document.getElementById("01").innerHTML.concat(error);
-            console.log(error);
-            return;
-        }
-        // Replace the contents of the "result" element with the apipost.responseText
-        // Replace newlines with <br> for HTML formatting
-        if (returnValue.includes(\n)) {
-            document.getElementById("01").innerHTML = returnValue.replace(/\\n/g, "<br>");
-        } else {
-            document.getElementById("01").innerHTML = returnValue;
-        }
-        
-        /////
-        //#2.  Query table ${DYNAMODB_PREFIX}-aepa for accountno from #1's accountno
-        //console.log("#2. ", queryAccountnos);
-        document.getElementById("02").innerHTML = document.getElementById("02").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n"
-            , "#2. Account ", queryAccountnos, " in aepa:\\n");
-        try {
-            await callDynamoDB(queryAccountnos, "accountno-index", "accountno", "dyntableprefix-aepa");
-        } catch (error) {
-            document.getElementById("02").innerHTML = document.getElementById("02").innerHTML.concat(error);
-            console.log(error);
-            return;
-        }
-        secondQueryJSON = queryResponse;
-        returnValue = document.getElementById("02").innerHTML.concat(JSON.stringify(secondQueryJSON.Items, null, 4));
-        // Replace the contents of the "result" element with the apipost.responseText
-        // Replace newlines with <br> for HTML formatting
-        if (returnValue.includes(\n)) {
-            document.getElementById("02").innerHTML = returnValue.replace(/\\n/g, "<br>");
-        } else {
-            document.getElementById("02").innerHTML = returnValue;
-        }
-        
-        /////
-        //#3.  Query table ${DYNAMODB_PREFIX}-listener for accountno from #1's accountno
-        document.getElementById("03").innerHTML = document.getElementById("03").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n"
-            , "#3. Listeners on account ", queryAccountnos, " in listener:\\n");
-        try {
-            await callDynamoDB(queryAccountnos, "accountno-index", "accountno", "dyntableprefix-listener");
-        } catch (error) {
-            document.getElementById("03").innerHTML = document.getElementById("03").innerHTML.concat(error);
-            console.log(error);
-            return;
-        }
-        thirdQueryJSON = queryResponse;
-        //console.log("#3. ", queryAccountnos);
-        queryListenerProfileIds = [];
-        for (thirditem of thirdQueryJSON.Items) {
-            if (thirditem.profileid) {
-                //console.log("profileid: " + thirditem.profileid);
-                queryListenerProfileIds.push(thirditem.profileid);
-            }
-        }
-        document.getElementById("03").innerHTML = document.getElementById("03").innerHTML.concat(JSON.stringify(thirdQueryJSON.Items, null, 4));
-        
-        /////
-        //#4.  Query table ${DYNAMODB_PREFIX}-profile for ProfileId from #1's PrimaryProfile
-        //console.log("#4. ", queryprimaryprofile[0]);
-        document.getElementById("04").innerHTML = document.getElementById("04").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n", 
-            "#4. Radio primaryprofile ", queryprimaryprofile[0], " in profile:\\n")
-        try {
-            await callDynamoDB(queryprimaryprofile[0], "profileid", "profileid", "dyntableprefix-profile");
-        } catch (error) {
-            document.getElementById("04").innerHTML = document.getElementById("04").innerHTML.concat(error);
-            console.log(error);
-            return;
-        }
-        fourthQueryJSON = queryResponse;
-        document.getElementById("04").innerHTML = document.getElementById("04").innerHTML.concat(JSON.stringify(fourthQueryJSON.Items, null, 4));
-        
-        /////
-        //#5.  Query table ${DYNAMODB_PREFIX}-profile for all ProfileId from #3's ProfileIds
-        //console.log("#5. ", queryListenerProfileIds);
-        document.getElementById("05").innerHTML = document.getElementById("05").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n#5. ");
-        queryProfileIds = [];
-        counter = 0;
-        if (queryListenerProfileIds.length > 0) {
-            for (listenerprofileid of queryListenerProfileIds) {
-                //console.log(listenerprofileid);
-                if (counter !== 0) {
-                    document.getElementById("05").innerHTML = document.getElementById("05").innerHTML.concat("\\n--------------------\\n#5. ");
-                }
-                document.getElementById("05").innerHTML = document.getElementById("05").innerHTML.concat("Additional Listeners profileid ", listenerprofileid, " in profile:\\n");
-                try {
-                    await callDynamoDB(listenerprofileid, "profileid", "profileid", "dyntableprefix-profile");
-                } catch (error) {
-                    document.getElementById("05").innerHTML = document.getElementById("05").innerHTML.concat(error);
-                    console.log(error);
-                    return;
-                }
-                counter = counter + 1;
-                fifthQueryJSON = queryResponse;
-                //console.log("fifthQueryResponse: " + JSON.stringify(fifthQueryJSON, null, 4));
-                for (fifthitem of fifthQueryJSON.Items) {
-                    if (fifthitem.profileid) {
-                        //console.log("profileid: " + fifthitem.profileid);
-                        queryProfileIds.push(fifthitem.profileid);
-                    }
-                }
-                document.getElementById("05").innerHTML = document.getElementById("05").innerHTML.concat(JSON.stringify(fifthQueryJSON.Items, null, 4));
-            }
-        } else {
-            document.getElementById("05").innerHTML = document.getElementById("05").innerHTML.concat("\\nNo ListenerProfileId values to query for.");
-        }
-        
-        /////
-        //#6. Query ${DYNAMODB_PREFIX}-subscription for subscriptionid from #1's subscriptionid
-        document.getElementById("06").innerHTML = document.getElementById("06").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n"
-            , "#6. Radio subscriptionid ", querysubscriptionid[0], " in subscription:\\n");
-        try {
-            await callDynamoDB(querysubscriptionid[0], "subscriptionid", "subscriptionid", "dyntableprefix-subscription");
-        } catch (error) {
-            document.getElementById("06").innerHTML = document.getElementById("06").innerHTML.concat(error);
-            console.log(error);
-            return;
-        }
-        sixthQueryJSON = queryResponse;
-        //console.log("#5.1. ", queryProfileIds);
-        //console.log("#6. ", querysubscriptionid[0]);
-        queryServiceIds = [];
-        returnValue = "";
-        for (sixthitem of sixthQueryJSON.Items) {
-            if (sixthitem.serviceids) {
-                for (sixthserviceid of sixthitem.serviceids) {
-                    //console.log("serviceids: " + sixthserviceid);
-                    queryServiceIds.push(sixthserviceid);
-                }
-            }
-        }
-        document.getElementById("06").innerHTML = document.getElementById("06").innerHTML.concat(JSON.stringify(sixthQueryJSON.Items, null, 4));
-        
-        /////
-        //#7. Loop over every serviceids returned from #6 and query ${DYNAMODB_PREFIX}-service for serviceid
-        //console.log("#7. ", queryServiceIds);
-        document.getElementById("07").innerHTML = document.getElementById("07").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n#7. ");
-        counter = 0;
-        if (queryServiceIds.length > 0) {
-            for (serviceid of queryServiceIds) {
-                if (counter === 0) {
-                    document.getElementById("07").innerHTML = document.getElementById("07").innerHTML.concat("Subscription serviceid ", serviceid, " in service:");
-                } else {
-                    document.getElementById("07").innerHTML = document.getElementById("07").innerHTML.concat("#7. Subscription serviceid ", serviceid, " in service:");
-                }
-                counter = counter + 1;
-                try {
-                    await callDynamoDB(serviceid, "serviceid", "serviceid", "dyntableprefix-service");
-                } catch (error) {
-                    document.getElementById("07").innerHTML = document.getElementById("07").innerHTML.concat(error);
-                    console.log(error);
-                    return;
-                }
-                seventhQueryJSON = queryResponse;
-                document.getElementById("07").innerHTML = document.getElementById("07").innerHTML.concat("\\n", JSON.stringify(seventhQueryJSON.Items, null, 4), "\\n");
-            }
-        } else {
-            document.getElementById("07").innerHTML = document.getElementById("07").innerHTML.concat("\\nNo ServiceId values to query for.");
-        }
-        
-        /////
-        //#8. Query ${DYNAMODB_PREFIX}-account for accountno from #1's accountno
-        //console.log("#8. ", queryAccountnos);
-        for (accountno of queryAccountnos) {
-            document.getElementById("08").innerHTML = document.getElementById("08").innerHTML.concat("\\n------------------------------------------------------------------------------------------------------------------------\\n"
-                , "#8. Radio accountno ", accountno, " in account:\\n");
-            try {
-                await callDynamoDB(accountno, "accountno", "accountno", "dyntableprefix-account");
-            } catch (error) {
-                document.getElementById("08").innerHTML = document.getElementById("08").innerHTML.concat(error);
-                console.log(error);
-                return;
-            }
-            eighthQueryJSON = queryResponse;
-            document.getElementById("08").innerHTML = document.getElementById("08").innerHTML.concat(JSON.stringify(eighthQueryJSON.Items, null, 4));
-        }
-        
-        // Hide the loading overlay
-        document.getElementById("loadingOverlay").style.display = "none";
-        document.getElementById("loadingOverlay-content").style.display = "none";
-    }; 
+}
 
-    // Defines the "click" event listener of the submit button
-    function setupClickEvent() {
-
-        // Configures submit button page element
-        // Executes the query to the calldb API endpoint and populates calldbResponse with the response 
-        const submit = document.querySelector('#submit');
-        queryInput = document.querySelector('#queryInput');
-        tableName = targetTable;
-        
-        document.getElementById("submit").addEventListener("click", function(){
-            // Validate the required inputs
-            if ( queryInput.value == '' ) {
-                alert("You must enter a value to query for.");
-                return;
-            }
-            
-            // Clear the contents of the 'result' div element
-            document.getElementById("01").innerHTML = "";
-            document.getElementById("02").innerHTML = "";
-            document.getElementById("03").innerHTML = "";
-            document.getElementById("04").innerHTML = "";
-            document.getElementById("05").innerHTML = "";
-            document.getElementById("06").innerHTML = "";
-            document.getElementById("07").innerHTML = "";
-            document.getElementById("08").innerHTML = "";
-            
-            mainFunction();
-        });
-    }
-    
-    // Defines the "click" event listener of the submitManual button
-    function executeQuery() {
-        return new Promise(function (resolve, reject) {
-            // Sets up submit button page element
-            // Executes the query to the calldb API endpoint and populates calldbResponse with the response 
-            const submit = document.querySelector('#submit');
-            const queryInputM = document.querySelector('#queryInputManual');
-            tableName = targetTable;
-            
-            document.getElementById("submitManual").addEventListener("click", function(){
-                // Clear the contents of the resultManual element
-                document.getElementById("resultManual").innerHTML = "";
-                // Validate the required inputs
-                if ( typeof partitionKey == 'undefined' ) {
-                    alert("You must select an index from the list.");
-                    return;
-                } else if ( queryInputM.value == '' ) {
-                    alert("You must enter a value to query for.");
-                    return;
-                }
-                
-                // Make the "Loading" overlay visible
-                document.getElementById("loadingOverlay").style.display = "flex";
-                document.getElementById("loadingOverlay-content").style.display = "flex";
-                    		
-                // Building the XMLHttpRequest object to POST to the calldb API endpoint, using sessionStorage.access_token
-                var apipost = new XMLHttpRequest();
-                // Any leading or trailing whitespace is removed from queryInputM.value with trim()
-                var url = "https://apiid.execute-api.theregion.amazonaws.com/stagename/calldb?queryTerm="+queryInputM.value.trim()+"&indexName="+indexName+"&partitionKey="+partitionKey+"&tableName="+tableName;
-                apipost.open("POST", url, true);
-                apipost.setRequestHeader("Content-Type", "application/json");
-                apipost.setRequestHeader("Authorization", sessionStorage.access_token);
-                
-                apipost.onload = function(event){
-                    const calldbResponse = JSON.parse(event.target.response);
-                    // Check that calldbResponse.Items is populated
-                    if (calldbResponse.Items !== null && calldbResponse.Items !== undefined) {
-                        // Print the Items from the API response that queried the DB
-                        document.getElementById("resultManual").innerHTML = document.getElementById("resultManual").innerHTML.concat("Response from API call: \\n", JSON.stringify(calldbResponse.Items, null, 4));
-                        //document.getElementById("mainAPI Response").innerHTML = "Response from API call: " + calldbResponse.replace(/\\n/g, "<br>");
-                        // Hide the loading overlay
-                        document.getElementById("loadingOverlay").style.display = "none";
-                        document.getElementById("loadingOverlay-content").style.display = "none";
-                        resolve();
-                    } else {    // Assume calldbResponse is a 401 error and begin the flow to request a new access token
-                        // Hide the "Loading" overlay
-                        document.getElementById("loadingOverlay").style.display = "none";
-                        document.getElementById("loadingOverlay-content").style.display = "none";
-                        // Reload the page to get a new access token
-                        document.location.reload();
-                        reject("Error - Access token is expired, reload the page.");
-                    }
-                    
-                };
-                // Ensure that we have a table and index to query
-                if ( indexName != 'No secondary indexes found.' ) {
-                    // Submit the main API POST with the request parameters as queryStrings in the url
-                    apipost.send();
-                } else {
-                    alert("No secondary indexes found so the query execution has been halted.");
-                }
-            });
-        })
-    }
-    
-    
-    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    // async function used for the initial page load
-    async function doMainExecute() {
-        await setupClickEvent();                    // Defines the "click" event listener
-        await postListTables();                     // Request all tables and build the tableList select element
-        try {
-            await executeQuery();                       // Defines the "click" event listener
-        } catch (error) {
-            document.getElementById("resultManual").innerHTML = document.getElementById("resultManual").innerHTML.concat(error);
-            console.log(error);
-            return;
+provider "aws" {
+    region = var.region
+    default_tags {
+        tags = {
+            "environment-type" = lower(var.var_env)
         }
-        // This event is needed to update the size of textareas as they are populated
-        let myEvent = new CustomEvent("update");
-        textarea.dispatchEvent(myEvent);
-        let myEventM = new CustomEvent("updateM");
-        textareaM.dispatchEvent(myEventM);
     }
-    
-    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////    
-    // Check if the page has finished loading before executing doMainExecute()
-    if (document.readyState !== 'loading') {
-        doMainExecute();
-    } else {    
-    // If the page is still loading add a listener for the DOMContentLoaded event so that doMainExecute() runs after it loads
-        document.addEventListener('DOMContentLoaded', function () {
-            doMainExecute();
-        });
+}
+
+locals {
+  MetadataURLsOnelogin = {
+    SIT = ""
+    DEV = ""
+    PERF = ""
+    PROD = ""
+  }
+}
+
+locals {
+  MetadataURLsOnelogin2 = {
+    SIT = ""
+    DEV = ""
+    PERF = ""
+    PROD = ""
+  }
+}
+
+locals {
+  MetadataURLsOkta = {
+    SIT = "URL/sso/saml/metadata"
+    DEV = "URL/sso/saml/metadata"
+    PERF = "URL/sso/saml/metadata"
+    PROD = "URL/sso/saml/metadata"
+  }
+}
+
+locals {
+  MetadataURLsOkta2 = {
+    SIT = "URL/sso/saml/metadata"
+    DEV = "URL/sso/saml/metadata"
+    PERF = "URL/sso/saml/metadata"
+    PROD = "URL/sso/saml/metadata"
+  }
+}
+
+locals {
+  TheAppAccountInfo = {
+    SIT = "AwsAccountId"
+    DEV = ""
+    PERF = ""
+    PROD = ""
+  }
+}
+
+############## IAM Role ##############
+resource "aws_iam_role" "TheApp_role" {
+
+  name = "TheApp_${lower(var.var_env)}"
+
+  assume_role_policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+EOF
+  tags = {
+    Description: "Role used by TheApp"
+  }
+}
+
+############## IAM Policy ##############
+resource "aws_iam_policy" "TheApp_policy" {
+    name = "TheAppCmkKms_${lower(var.var_env)}"
+
+    policy = <<EOF
+{
+    "Statement": [
+        {
+            "Action": [
+                "kms:Decrypt",
+                "kms:Encrypt",
+                "kms:GenerateDataKey"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:kms:*:${var.account_id}:key/*"
+            ],
+            "Sid": "VisualEditor0"
+        }
+    ],
+    "Version": "2012-10-17"
+}
+EOF
+}
+
+resource "aws_iam_policy" "TheApp_lambdapolicy" {
+    name = "TheAppLambdaBucket_${lower(var.var_env)}"
+
+    policy = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+		"s3:ListObject",
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:PutObjectAcl"
+            ],
+            "Resource": "arn:aws:s3:::TheApp-lambdas/*"
+
+        }
+    ]
+}
+EOF
+}
+
+resource "aws_iam_role_policy_attachment" "TheAppCmkKms" {
+  role = aws_iam_role.TheApp_role.name
+  policy_arn = aws_iam_policy.TheApp_policy.arn
+}
+
+resource "aws_iam_role_policy_attachment" "AmazonDynamoDBFullAccess" {
+  role = aws_iam_role.TheApp_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+}
+
+# For cloudwatch permissions
+resource "aws_iam_role_policy_attachment" "AWSLambdaBasicExecutionRole" {
+  role = aws_iam_role.TheApp_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# For the S3 bucket where the Lambda zips are
+resource "aws_iam_role_policy_attachment" "TheApp_lambdapolicy" {
+  role = aws_iam_role.TheApp_role.name
+  policy_arn = aws_iam_policy.TheApp_lambdapolicy.arn
+}
+
+############## user pool ##############
+resource "aws_cognito_user_pool" "TheApp-lambda-SAML" {
+  name = "TheApp-lambda-SAML-${lower(var.var_env)}"
+  admin_create_user_config {
+  allow_admin_create_user_only = true
+  }
+}
+
+############## user pool domain ##############
+resource "aws_cognito_user_pool_domain" "TheApp" {
+  domain       = "TheApp-${lower(var.var_env)}"
+  user_pool_id = aws_cognito_user_pool.TheApp-lambda-SAML.id
+}
+
+############## identity providers ##############
+resource "aws_cognito_identity_provider" "Onelogin" {
+  user_pool_id  = aws_cognito_user_pool.TheApp-lambda-SAML.id
+  provider_name = "Onelogin"
+  provider_type = "SAML"
+
+  provider_details = {
+    MetadataURL      = local.MetadataURLsOnelogin[var.var_env]
+#    client_id        = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id
+  }
+
+  attribute_mapping = {
+    email    = "NAMEID"
+  }
+}
+
+resource "aws_cognito_identity_provider" "Onelogin2" {
+  user_pool_id  = aws_cognito_user_pool.TheApp-lambda-SAML.id
+  provider_name = "Onelogin2"
+  provider_type = "SAML"
+
+  provider_details = {
+    MetadataURL      = local.MetadataURLsOnelogin2[var.var_env]
+#    client_id        = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id
+  }
+
+  attribute_mapping = {
+    email    = "NAMEID"
+  }
+}
+
+resource "aws_cognito_identity_provider" "Okta" {
+  user_pool_id  = aws_cognito_user_pool.TheApp-lambda-SAML.id
+  provider_name = "Okta"
+  provider_type = "SAML"
+
+  provider_details = {
+    MetadataURL      = local.MetadataURLsOkta[var.var_env]
+#    client_id        = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id
+  }
+
+  attribute_mapping = {
+    email    = "NAMEID"
+  }
+}
+
+resource "aws_cognito_identity_provider" "Okta2" {
+  user_pool_id  = aws_cognito_user_pool.TheApp-lambda-SAML.id
+  provider_name = "Okta2"
+  provider_type = "SAML"
+
+  provider_details = {
+    MetadataURL      = local.MetadataURLsOkta2[var.var_env]
+#    client_id        = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id
+  }
+
+  attribute_mapping = {
+    email    = "NAMEID"
+  }
+}
+
+############## mainapi resource server and scope ##############
+resource "aws_cognito_resource_server" "mainapi" {
+  identifier = "mainapi"
+  name       = "API"
+
+  scope {
+    scope_name        = "api"
+    scope_description = "The main api scope"
+  }
+
+  scope {
+    scope_name        = "nonce"
+    scope_description = "For accessing nonce keys"
+  }
+
+  user_pool_id = aws_cognito_user_pool.TheApp-lambda-SAML.id
+}
+
+############## Main App Client ##############
+resource "aws_cognito_user_pool_client" "TheApp-lambda-SAML-client-noSecret" {
+  name = "TheApp-lambda-SAML-client-noSecret-${lower(var.var_env)}"
+
+  user_pool_id = aws_cognito_user_pool.TheApp-lambda-SAML.id
+
+  generate_secret                      = false
+  explicit_auth_flows                  = ["ALLOW_CUSTOM_AUTH","ALLOW_REFRESH_TOKEN_AUTH","ALLOW_USER_SRP_AUTH"]
+  callback_urls                        = ["https://${aws_api_gateway_rest_api.TheApp-cognito.id}.execute-api.${var.region}.amazonaws.com/${lower(var.var_env)}/redirect"]
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = ["phone", "email", "openid", "aws.cognito.signin.user.admin", "mainapi/api"]
+  supported_identity_providers         = ["Onelogin", "Okta"]
+  refresh_token_validity               = 1
+  access_token_validity                = 60
+  id_token_validity                    = 60
+  token_validity_units                 {
+                                         refresh_token = "days"
+                                         access_token = "minutes"
+                                         id_token = "minutes"
+                                       }
+  depends_on = [
+    aws_cognito_identity_provider.Onelogin,
+    aws_cognito_identity_provider.Okta
+  ]
+}
+
+############## Nonce App Client ##############
+resource "aws_cognito_user_pool_client" "TheApp-lambda-SAML-client-noSecret-allowNonce" {
+  name = "TheApp-lambda-SAML-client-noSecret-allowNonce-${lower(var.var_env)}"
+
+  user_pool_id = aws_cognito_user_pool.TheApp-lambda-SAML.id
+
+  generate_secret                      = false
+  explicit_auth_flows                  = ["ALLOW_CUSTOM_AUTH","ALLOW_REFRESH_TOKEN_AUTH","ALLOW_USER_SRP_AUTH"]
+  callback_urls                        = ["https://${aws_api_gateway_rest_api.TheApp-cognito.id}.execute-api.${var.region}.amazonaws.com/${lower(var.var_env)}/redirect2"]
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = ["phone", "email", "openid", "aws.cognito.signin.user.admin", "mainapi/api", "mainapi/nonce"]
+  supported_identity_providers         = ["Onelogin2", "Okta2"]
+  refresh_token_validity               = 1
+  access_token_validity                = 60
+  id_token_validity                    = 60
+  token_validity_units                 {
+                                         refresh_token = "days"
+                                         access_token = "minutes"
+                                         id_token = "minutes"
+                                       }
+  depends_on = [
+    aws_cognito_identity_provider.Onelogin2,
+    aws_cognito_identity_provider.Okta2
+  ]
+}
+
+############## Lambda functions ##############
+resource "aws_lambda_function" "TheApp-redirect" {
+  # If the file is not in the current working directory you will need to include a path.module in the filename.
+  s3_bucket = "TheApp-lambdas"
+  s3_key    = "TheApp-redirect-${var.var_redirect_version}.zip"
+  function_name = "TheApp-redirect-${lower(var.var_env)}"
+  handler = "index.handler"
+  role          = aws_iam_role.TheApp_role.arn
+  runtime = "nodejs16.x"
+  environment {
+    variables = {
+      userpooldomain = aws_cognito_user_pool_domain.TheApp.domain
+      theregion = var.region
+      userpoolclientid = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id
+      apiid = aws_api_gateway_rest_api.TheApp-cognito.id
+      stagename = lower(var.var_env)
     }
-    
+  }
+}
 
-</script>
-
-</body>
-</html>"""
+resource "aws_lambda_function" "TheApp-redirect2" {
+  # If the file is not in the current working directory you will need to include a path.module in the filename.
+  s3_bucket = "TheApp-lambdas"
+  s3_key    = "TheApp-redirect2-${var.var_redirect2_version}.zip"
+  function_name = "TheApp-redirect2-${lower(var.var_env)}"
+  handler = "index.handler"
+  role          = aws_iam_role.TheApp_role.arn
+  runtime = "nodejs16.x"
+  environment {
+    variables = {
+      userpooldomain = aws_cognito_user_pool_domain.TheApp.domain
+      theregion = var.region
+      userpoolclientid = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret-allowNonce.id
+      apiid = aws_api_gateway_rest_api.TheApp-cognito.id
+      stagename = lower(var.var_env)
     }
-    
-    # Insert the contents of the environment variables into the response
-    thebody = responseToReturn['body']
-    thebody = thebody.replace("userpooldomain", userpooldomain)
-    thebody = thebody.replace("theregion", theregion)
-    thebody = thebody.replace("apiid", apiid)
-    thebody = thebody.replace("stagename", stagename)
-    thebody = thebody.replace("dyntableprefix", dyntableprefix)
-    # Check the scopes passed to the lambda to determine which userpool clientID to use
-    if "mainapi/nonce" in theScopes:
-        thebody = thebody.replace("userpoolclientid", userpoolclientid2)
-    else:
-        thebody = thebody.replace("userpoolclientid", userpoolclientid1)
+  }
+}
 
-    responseToReturn.update({'body': thebody})
-	
-    return(responseToReturn)
+resource "aws_lambda_function" "TheApp-dynamodb" {
+  s3_bucket = "TheApp-lambdas"
+  s3_key      = "TheApp-dynamodb-${var.var_dynamodb_version}.zip"
+  function_name = "TheApp-dynamodb-${lower(var.var_env)}"
+  handler = "lambda_function.lambda_handler"
+  role          = aws_iam_role.TheApp_role.arn
+  runtime = "python3.9"
+}
+
+resource "aws_lambda_function" "TheApp-dynamodbDescribeTable" {
+  s3_bucket = "TheApp-lambdas"
+  s3_key      = "TheApp-dynamodbDescribeTable-${var.var_dynamodbDescribeTable_version}.zip"
+  function_name = "TheApp-dynamodbDescribeTable-${lower(var.var_env)}"
+  handler = "lambda_function.lambda_handler"
+  role          = aws_iam_role.TheApp_role.arn
+  runtime = "python3.9"
+}
+
+resource "aws_lambda_function" "TheApp-ListTables" {
+  s3_bucket = "TheApp-lambdas"
+  s3_key      = "TheApp-listTables-${var.var_ListTables_version}.zip"
+  function_name = "TheApp-ListTables-${lower(var.var_env)}"
+  handler = "lambda_function.lambda_handler"
+  role          = aws_iam_role.TheApp_role.arn
+  runtime = "python3.9"
+  environment {
+    variables = {
+      userpooldomain = aws_cognito_user_pool_domain.TheApp.domain
+      theregion = var.region
+      userpoolclientid = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id
+      apiid = aws_api_gateway_rest_api.TheApp-cognito.id
+      stagename = lower(var.var_env)
+    }
+  }
+}
+
+resource "aws_lambda_function" "TheApp-main" {
+  s3_bucket = "TheApp-lambdas"
+  s3_key      = "TheApp-main-${var.var_main_version}.zip"
+  function_name = "TheApp-main-${lower(var.var_env)}"
+  handler = "lambda_function.lambda_handler"
+  role          = aws_iam_role.TheApp_role.arn
+  runtime = "python3.9"
+  environment {
+    variables = {
+      userpooldomain = aws_cognito_user_pool_domain.TheApp.domain
+      theregion = var.region
+      userpoolclientid1 = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id
+      userpoolclientid2 = aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret-allowNonce.id
+      apiid = aws_api_gateway_rest_api.TheApp-cognito.id
+      stagename = lower(var.var_env)
+    }
+  }
+}
+
+############## Metric Filters ##############
+resource "aws_cloudwatch_log_metric_filter" "TheApp-dynamodb_invocations_metric_filter" {
+  name           = "TheApp-dynamodb-${lower(var.var_env)}_invocations"
+  pattern        = "[FilterForLinesStartingWithUsername = \"Username\", , , , Username, , , , LogIndex, , , , PartitionKey, , , Table]"
+  log_group_name = "/aws/lambda/TheApp-dynamodb-${lower(var.var_env)}"
+
+  metric_transformation {
+    name      = "Queries_using_TheApp-dynamodb-${lower(var.var_env)}"
+    namespace = "Lambda/TheApp"
+    value     = "1"
+    unit      = "Count"
+    dimensions = {
+    "By-Username" = "$Username"
+    }
+  }
+  depends_on = [
+    aws_lambda_function.TheApp-dynamodb
+  ]
+}
+
+############## SNS Topic ##############
+resource "aws_sns_topic" "TheApp-topic" {
+  name = "TheApp-${lower(var.var_env)}"
+}
+
+############## SNS Subscriptions ##############
+resource "aws_sns_topic_subscription" "email-target" {
+  topic_arn = aws_sns_topic.TheApp-topic.arn
+  protocol  = "email"
+  endpoint  = "TheApp-invoke-alarms@EXAMPLE.opsgenie.net"
+  depends_on = [
+    aws_sns_topic.TheApp-topic
+  ]
+}
+
+############## Metric Filter Alarms ##############
+resource "aws_cloudwatch_metric_alarm" "TheApp-dynamodb_invocations_metric_filter_alarm" {
+  alarm_name                = "Invoke alarm for TheApp-dynamodb-${lower(var.var_env)}"
+  comparison_operator       = "GreaterThanThreshold"
+  evaluation_periods        = 1
+  threshold                 = 20
+  alarm_description         = "The Lambda \"TheApp-dynamodb-${lower(var.var_env)}\" in ${local.TheAppAccountInfo[var.var_env]} has been invoked more then 20 times in the last three hours by a single user.  https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#metricsV2?graph=~(metrics~(~(~(expression~'SELECT*20COUNT*28*22Queries_using_TheApp-dynamodb-${lower(var.var_env)}*22*29*20FROM*20*22Lambda*2fTheApp*22*20GROUP*20BY*20*22By-Username*22~id~'q1~period~60~stat~'Sum~yAxis~'left)))~view~'timeSeries~stacked~false~region~'us-east-1~stat~'Sum~period~60)&query=~'7bLambda2fTheApp2cBy-Username7d*20Queries_using_TheApp-dynamodb-${lower(var.var_env)}"
+  alarm_actions             = [aws_sns_topic.TheApp-topic.arn]
+  insufficient_data_actions = [aws_sns_topic.TheApp-topic.arn]
+  metric_query {
+    id          = "toreturn"
+    expression  = "MAX(q1)"
+    label       = "Max(By-Username) invocations of TheApp-dynamodb-${lower(var.var_env)}"
+    return_data = "true"
+  }
+  metric_query {
+    id          = "q1"
+    expression  = "SELECT COUNT(\"Queries_using_TheApp-dynamodb-${lower(var.var_env)}\") FROM \"Lambda/TheApp\" GROUP BY \"By-Username\""
+    period      = 10800
+  }
+  depends_on = [
+    aws_cloudwatch_log_metric_filter.TheApp-dynamodb_invocations_metric_filter,
+    aws_sns_topic_subscription.email-target,
+    aws_sns_topic.TheApp-topic
+  ]
+}
+
+############## API Authorizer ##############
+resource "aws_api_gateway_authorizer" "TheApp-cognito-authorizer" {
+  name                   = "TheApp-cognito-authorizer"
+  type 			 = "COGNITO_USER_POOLS"
+  rest_api_id            = aws_api_gateway_rest_api.TheApp-cognito.id
+  provider_arns		 = [aws_cognito_user_pool.TheApp-lambda-SAML.arn]
+  authorizer_credentials = aws_iam_role.TheApp_role.arn
+}
+
+############## Rest API ##############
+resource "aws_api_gateway_rest_api" "TheApp-cognito" {
+  name = "TheApp-cognito-${lower(var.var_env)}"
+  put_rest_api_mode = "merge"
+
+  endpoint_configuration {
+    types = ["REGIONAL"]
+  }
+}
+
+############## Rest API endpoints ##############
+resource "aws_api_gateway_resource" "TheApp-redirect" {
+  parent_id   = aws_api_gateway_rest_api.TheApp-cognito.root_resource_id
+  path_part   = "redirect"
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+resource "aws_api_gateway_resource" "TheApp-redirect2" {
+  parent_id   = aws_api_gateway_rest_api.TheApp-cognito.root_resource_id
+  path_part   = "redirect2"
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+resource "aws_api_gateway_resource" "TheApp-main" {
+  parent_id   = aws_api_gateway_rest_api.TheApp-cognito.root_resource_id
+  path_part   = "main"
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+resource "aws_api_gateway_resource" "TheApp-describetable" {
+  parent_id   = aws_api_gateway_rest_api.TheApp-cognito.root_resource_id
+  path_part   = "describetable"
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+resource "aws_api_gateway_resource" "TheApp-listtables" {
+  parent_id   = aws_api_gateway_rest_api.TheApp-cognito.root_resource_id
+  path_part   = "listtables"
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+resource "aws_api_gateway_resource" "TheApp-calldb" {
+  parent_id   = aws_api_gateway_rest_api.TheApp-cognito.root_resource_id
+  path_part   = "calldb"
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+############## Rest API methods ##############
+resource "aws_api_gateway_method" "TheApp-redirectget" {
+  authorization = "NONE"
+  http_method   = "GET"
+  resource_id   = aws_api_gateway_resource.TheApp-redirect.id
+  rest_api_id   = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+resource "aws_api_gateway_method" "TheApp-redirect2get" {
+  authorization = "NONE"
+  http_method   = "GET"
+  resource_id   = aws_api_gateway_resource.TheApp-redirect2.id
+  rest_api_id   = aws_api_gateway_rest_api.TheApp-cognito.id
+}
+
+resource "aws_api_gateway_method" "TheApp-mainpost" {
+  authorization = "COGNITO_USER_POOLS"
+  authorization_scopes = ["phone", "email", "openid", "aws.cognito.signin.user.admin", "mainapi/api"]
+  http_method   = "POST"
+  resource_id   = aws_api_gateway_resource.TheApp-main.id
+  rest_api_id   = aws_api_gateway_rest_api.TheApp-cognito.id
+  authorizer_id = aws_api_gateway_authorizer.TheApp-cognito-authorizer.id
+  request_parameters   = {
+    "method.request.querystring.indexName"       = false
+    "method.request.querystring.partitionKey" = false
+    "method.request.querystring.queryTerm"       = false
+    "method.request.querystring.tableName"       = false
+  }
+}
+
+resource "aws_api_gateway_method" "TheApp-describetablepost" {
+  authorization = "COGNITO_USER_POOLS"
+  authorization_scopes = ["phone", "email", "openid", "aws.cognito.signin.user.admin", "mainapi/api"]
+  http_method   = "POST"
+  resource_id   = aws_api_gateway_resource.TheApp-describetable.id
+  rest_api_id   = aws_api_gateway_rest_api.TheApp-cognito.id
+  authorizer_id = aws_api_gateway_authorizer.TheApp-cognito-authorizer.id
+  request_parameters   = {
+    "method.request.querystring.indexName"       = false
+    "method.request.querystring.partitionKey" = false
+    "method.request.querystring.queryTerm"       = false
+    "method.request.querystring.tableName"       = false
+  }
+}
+
+resource "aws_api_gateway_method" "TheApp-listtablespost" {
+  authorization = "COGNITO_USER_POOLS"
+  authorization_scopes = ["phone", "email", "openid", "aws.cognito.signin.user.admin", "mainapi/api"]
+  http_method   = "POST"
+  resource_id   = aws_api_gateway_resource.TheApp-listtables.id
+  rest_api_id   = aws_api_gateway_rest_api.TheApp-cognito.id
+  authorizer_id = aws_api_gateway_authorizer.TheApp-cognito-authorizer.id
+  request_parameters   = {
+    "method.request.querystring.queryTerm"       = false
+  }
+}
+
+resource "aws_api_gateway_method" "TheApp-calldbpost" {
+  authorization = "COGNITO_USER_POOLS"
+  authorization_scopes = ["phone", "email", "openid", "aws.cognito.signin.user.admin", "mainapi/api"]
+  http_method   = "POST"
+  resource_id   = aws_api_gateway_resource.TheApp-calldb.id
+  rest_api_id   = aws_api_gateway_rest_api.TheApp-cognito.id
+  authorizer_id = aws_api_gateway_authorizer.TheApp-cognito-authorizer.id
+  request_parameters   = {
+    "method.request.querystring.indexName"       = false
+    "method.request.querystring.partitionKey" = false
+    "method.request.querystring.queryTerm"       = false
+    "method.request.querystring.tableName"       = false
+  }
+}
+
+############## Rest API integrations  ##############
+resource "aws_api_gateway_integration" "TheApp-redirectintegration" {
+  http_method = aws_api_gateway_method.TheApp-redirectget.http_method
+  resource_id = aws_api_gateway_resource.TheApp-redirect.id
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  timeout_milliseconds = 6000
+  integration_http_method = "POST"
+  type        = "AWS_PROXY"
+  uri = aws_lambda_function.TheApp-redirect.invoke_arn
+  depends_on = [
+    aws_api_gateway_method.TheApp-redirectget
+  ]
+}
+
+resource "aws_api_gateway_integration" "TheApp-redirect2integration" {
+  http_method = aws_api_gateway_method.TheApp-redirect2get.http_method
+  resource_id = aws_api_gateway_resource.TheApp-redirect2.id
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  timeout_milliseconds = 6000
+  integration_http_method = "POST"
+  type        = "AWS_PROXY"
+  uri = aws_lambda_function.TheApp-redirect2.invoke_arn
+  depends_on = [
+    aws_api_gateway_method.TheApp-redirect2get
+  ]
+}
+
+resource "aws_api_gateway_integration" "TheApp-mainintegration" {
+  http_method = aws_api_gateway_method.TheApp-mainpost.http_method
+  resource_id = aws_api_gateway_resource.TheApp-main.id
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  timeout_milliseconds = 6000
+  integration_http_method = "POST"
+  type        = "AWS_PROXY"
+  uri = aws_lambda_function.TheApp-main.invoke_arn
+  depends_on = [
+    aws_api_gateway_method.TheApp-mainpost
+  ]
+}
+
+resource "aws_api_gateway_integration" "TheApp-describetableintegration" {
+  http_method = aws_api_gateway_method.TheApp-describetablepost.http_method
+  resource_id = aws_api_gateway_resource.TheApp-describetable.id
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  timeout_milliseconds = 6000
+  integration_http_method = "POST"
+  type        = "AWS_PROXY"
+  uri = aws_lambda_function.TheApp-dynamodbDescribeTable.invoke_arn
+  depends_on = [
+    aws_api_gateway_method.TheApp-describetablepost
+  ]
+}
+
+resource "aws_api_gateway_integration" "TheApp-listtablesintegration" {
+  http_method = aws_api_gateway_method.TheApp-listtablespost.http_method
+  resource_id = aws_api_gateway_resource.TheApp-listtables.id
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  timeout_milliseconds = 6000
+  integration_http_method = "POST"
+  type        = "AWS_PROXY"
+  uri = aws_lambda_function.TheApp-ListTables.invoke_arn
+  depends_on = [
+    aws_api_gateway_method.TheApp-listtablespost
+  ]
+}
+
+resource "aws_api_gateway_integration" "TheApp-calldbintegration" {
+  http_method = aws_api_gateway_method.TheApp-calldbpost.http_method
+  resource_id = aws_api_gateway_resource.TheApp-calldb.id
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  timeout_milliseconds = 6000
+  integration_http_method = "POST"
+  type        = "AWS_PROXY"
+  uri = aws_lambda_function.TheApp-dynamodb.invoke_arn
+  depends_on = [
+    aws_api_gateway_method.TheApp-calldbpost
+  ]
+}
+
+############## Rest API integration responses  ##############
+resource "aws_api_gateway_integration_response" "TheApp-redirect-integrationresponse" {
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  resource_id = aws_api_gateway_resource.TheApp-redirect.id
+  http_method = aws_api_gateway_method.TheApp-redirectget.http_method
+  status_code = "200"
+
+  # Transforms the backend JSON response to XML
+  response_templates = {
+    "application/xml" = <<EOF
+#set($inputRoot = $input.path('$'))
+<?xml version="1.0" encoding="UTF-8"?>
+<message>
+    $inputRoot.body
+</message>
+EOF
+  }
+  depends_on = [
+    aws_api_gateway_integration.TheApp-redirectintegration
+  ]
+}
+
+resource "aws_api_gateway_integration_response" "TheApp-redirect2-integrationresponse" {
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  resource_id = aws_api_gateway_resource.TheApp-redirect2.id
+  http_method = aws_api_gateway_method.TheApp-redirect2get.http_method
+  status_code = "200"
+
+  # Transforms the backend JSON response to XML
+  response_templates = {
+    "application/xml" = <<EOF
+#set($inputRoot = $input.path('$'))
+<?xml version="1.0" encoding="UTF-8"?>
+<message>
+    $inputRoot.body
+</message>
+EOF
+  }
+  depends_on = [
+    aws_api_gateway_integration.TheApp-redirect2integration
+  ]
+}
+
+resource "aws_api_gateway_integration_response" "TheApp-main-integrationresponse" {
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  resource_id = aws_api_gateway_resource.TheApp-main.id
+  http_method = aws_api_gateway_method.TheApp-mainpost.http_method
+  status_code = "200"
+
+  # Transforms the backend JSON response to XML
+  response_templates = {
+    "application/xml" = <<EOF
+#set($inputRoot = $input.path('$'))
+<?xml version="1.0" encoding="UTF-8"?>
+<message>
+    $inputRoot.body
+</message>
+EOF
+  }
+  depends_on = [
+    aws_api_gateway_integration.TheApp-mainintegration
+  ]
+}
+
+resource "aws_api_gateway_integration_response" "TheApp-describetable-integrationresponse" {
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  resource_id = aws_api_gateway_resource.TheApp-describetable.id
+  http_method = aws_api_gateway_method.TheApp-describetablepost.http_method
+  status_code = "200"
+
+  # Transforms the backend JSON response to XML
+  response_templates = {
+    "application/xml" = <<EOF
+#set($inputRoot = $input.path('$'))
+<?xml version="1.0" encoding="UTF-8"?>
+<message>
+    $inputRoot.body
+</message>
+EOF
+  }
+  depends_on = [
+    aws_api_gateway_integration.TheApp-describetableintegration
+  ]
+}
+
+resource "aws_api_gateway_integration_response" "TheApp-listtables-integrationresponse" {
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  resource_id = aws_api_gateway_resource.TheApp-listtables.id
+  http_method = aws_api_gateway_method.TheApp-listtablespost.http_method
+  status_code = "200"
+
+  # Transforms the backend JSON response to XML
+  response_templates = {
+    "application/xml" = <<EOF
+#set($inputRoot = $input.path('$'))
+<?xml version="1.0" encoding="UTF-8"?>
+<message>
+    $inputRoot.body
+</message>
+EOF
+  }
+  depends_on = [
+    aws_api_gateway_integration.TheApp-listtablesintegration
+  ]
+}
+
+resource "aws_api_gateway_integration_response" "TheApp-calldb-integrationresponse" {
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+  resource_id = aws_api_gateway_resource.TheApp-calldb.id
+  http_method = aws_api_gateway_method.TheApp-calldbpost.http_method
+  status_code = "200"
+
+  # Transforms the backend JSON response to XML
+  response_templates = {
+    "application/xml" = <<EOF
+#set($inputRoot = $input.path('$'))
+<?xml version="1.0" encoding="UTF-8"?>
+<message>
+    $inputRoot.body
+</message>
+EOF
+  }
+  depends_on = [
+    aws_api_gateway_integration.TheApp-calldbintegration
+  ]
+}
+
+############## lambda permissions for the API ##############
+resource "aws_lambda_permission" "apigw_lambda_redirect" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.TheApp-redirect.function_name
+  principal     = "apigateway.amazonaws.com"
+
+  # More: http://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-control-access-using-iam-policies-to-invoke-api.html
+  source_arn = "arn:aws:execute-api:${var.region}:${var.account_id}:${aws_api_gateway_rest_api.TheApp-cognito.id}/*/${aws_api_gateway_method.TheApp-redirectget.http_method}${aws_api_gateway_resource.TheApp-redirect.path}"
+}
+
+resource "aws_lambda_permission" "apigw_lambda_redirect2" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.TheApp-redirect2.function_name
+  principal     = "apigateway.amazonaws.com"
+
+  # More: http://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-control-access-using-iam-policies-to-invoke-api.html
+  source_arn = "arn:aws:execute-api:${var.region}:${var.account_id}:${aws_api_gateway_rest_api.TheApp-cognito.id}/*/${aws_api_gateway_method.TheApp-redirect2get.http_method}${aws_api_gateway_resource.TheApp-redirect2.path}"
+}
+
+resource "aws_lambda_permission" "apigw_lambda_main" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.TheApp-main.function_name
+  principal     = "apigateway.amazonaws.com"
+
+  # More: http://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-control-access-using-iam-policies-to-invoke-api.html
+  source_arn = "arn:aws:execute-api:${var.region}:${var.account_id}:${aws_api_gateway_rest_api.TheApp-cognito.id}/*/${aws_api_gateway_method.TheApp-mainpost.http_method}${aws_api_gateway_resource.TheApp-main.path}"
+}
+
+resource "aws_lambda_permission" "apigw_lambda_describetable" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.TheApp-dynamodbDescribeTable.function_name
+  principal     = "apigateway.amazonaws.com"
+
+  # More: http://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-control-access-using-iam-policies-to-invoke-api.html
+  source_arn = "arn:aws:execute-api:${var.region}:${var.account_id}:${aws_api_gateway_rest_api.TheApp-cognito.id}/*/${aws_api_gateway_method.TheApp-describetablepost.http_method}${aws_api_gateway_resource.TheApp-describetable.path}"
+}
+
+resource "aws_lambda_permission" "apigw_lambda_listtables" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.TheApp-ListTables.function_name
+  principal     = "apigateway.amazonaws.com"
+
+  # More: http://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-control-access-using-iam-policies-to-invoke-api.html
+  source_arn = "arn:aws:execute-api:${var.region}:${var.account_id}:${aws_api_gateway_rest_api.TheApp-cognito.id}/*/${aws_api_gateway_method.TheApp-listtablespost.http_method}${aws_api_gateway_resource.TheApp-listtables.path}"
+}
+
+resource "aws_lambda_permission" "apigw_lambda_calldb" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.TheApp-dynamodb.function_name
+  principal     = "apigateway.amazonaws.com"
+
+  # More: http://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-control-access-using-iam-policies-to-invoke-api.html
+  source_arn = "arn:aws:execute-api:${var.region}:${var.account_id}:${aws_api_gateway_rest_api.TheApp-cognito.id}/*/${aws_api_gateway_method.TheApp-calldbpost.http_method}${aws_api_gateway_resource.TheApp-calldb.path}"
+}
+
+############## API deployment ##############
+resource "aws_api_gateway_deployment" "TheApp" {
+  rest_api_id = aws_api_gateway_rest_api.TheApp-cognito.id
+
+  triggers = {
+    redeployment = sha1(jsonencode([
+      aws_api_gateway_resource.TheApp-redirect.id,
+      aws_api_gateway_resource.TheApp-redirect2.id,
+      aws_api_gateway_resource.TheApp-main.id,
+      aws_api_gateway_resource.TheApp-describetable.id,
+      aws_api_gateway_resource.TheApp-listtables.id,
+      aws_api_gateway_resource.TheApp-calldb.id,
+      aws_api_gateway_method.TheApp-redirectget.id,
+      aws_api_gateway_method.TheApp-redirect2get.id,
+      aws_api_gateway_method.TheApp-mainpost.id,
+      aws_api_gateway_method.TheApp-describetablepost.id,
+      aws_api_gateway_method.TheApp-listtablespost.id,
+      aws_api_gateway_method.TheApp-calldbpost.id,
+      aws_api_gateway_integration.TheApp-redirectintegration.id,
+      aws_api_gateway_integration.TheApp-redirect2integration.id,
+      aws_api_gateway_integration.TheApp-mainintegration.id,
+      aws_api_gateway_integration.TheApp-describetableintegration.id,
+      aws_api_gateway_integration.TheApp-listtablesintegration.id,
+      aws_api_gateway_integration.TheApp-calldbintegration.id
+    ]))
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+############## API deployment stage ##############
+resource "aws_api_gateway_stage" "TheApp" {
+  deployment_id = aws_api_gateway_deployment.TheApp.id
+  rest_api_id   = aws_api_gateway_rest_api.TheApp-cognito.id
+  stage_name    = lower(var.var_env)
+}
+
+############## Set up output needed for SAML configuration ##############
+output "clientdata" {
+  value = [
+    "UserPoolID = ${aws_cognito_user_pool.TheApp-lambda-SAML.id}",
+    "RelayState = https://${aws_api_gateway_rest_api.TheApp-cognito.id}.execute-api.${var.region}.amazonaws.com",
+    "DomainPrefix = ${aws_cognito_user_pool_domain.TheApp.domain}",
+    "Region = ${var.region}"
+  ]
+}
+
+output "authendpoint" {
+  value = "https://${aws_cognito_user_pool_domain.TheApp.domain}.auth.${var.region}.amazoncognito.com/login?client_id=${aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret.id}&response_type=code&scope=aws.cognito.signin.user.admin+email+mainapi/api+openid+phone&redirect_uri=https://${aws_api_gateway_rest_api.TheApp-cognito.id}.execute-api.${var.region}.amazonaws.com/${lower(var.var_env)}/redirect"
+}
+
+output "authendpointNonce" {
+  value = "https://${aws_cognito_user_pool_domain.TheApp.domain}.auth.${var.region}.amazoncognito.com/login?client_id=${aws_cognito_user_pool_client.TheApp-lambda-SAML-client-noSecret-allowNonce.id}&response_type=code&scope=aws.cognito.signin.user.admin+email+mainapi/api+mainapi/nonce+openid+phone&redirect_uri=https://${aws_api_gateway_rest_api.TheApp-cognito.id}.execute-api.${var.region}.amazonaws.com/${lower(var.var_env)}/redirect2"
+}
