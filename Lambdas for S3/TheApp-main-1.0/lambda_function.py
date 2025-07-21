@@ -310,7 +310,7 @@ resource "aws_lambda_function" "TheApp-redirect" {
   function_name = "TheApp-redirect-${lower(var.var_env)}"
   handler = "index.handler"
   role          = aws_iam_role.TheApp_role.arn
-  runtime = "nodejs16.x"
+  runtime = "nodejs22.x"
   environment {
     variables = {
       userpooldomain = aws_cognito_user_pool_domain.TheApp.domain
@@ -329,7 +329,7 @@ resource "aws_lambda_function" "TheApp-redirect2" {
   function_name = "TheApp-redirect2-${lower(var.var_env)}"
   handler = "index.handler"
   role          = aws_iam_role.TheApp_role.arn
-  runtime = "nodejs16.x"
+  runtime = "nodejs22.x"
   environment {
     variables = {
       userpooldomain = aws_cognito_user_pool_domain.TheApp.domain
